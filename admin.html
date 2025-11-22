@@ -1,79 +1,456 @@
-<!DOCTYPE html>
-<html lang="bn">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Admin Panel - Shohoj World</title>
-<script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-100 min-h-screen flex flex-col">
+    <script src='//libtl.com/sdk.js' data-zone='10223580' data-sdk='show_10223580'></script>
+    
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Configuration & Environment Variables (MANDATORY)
+        setLogLevel('Debug');
+        const appId = typeof app_id !== 'undefined' ? app_id : 'default-app-id';
+        const firebaseConfig = typeof firebase_config !== 'undefined' ? JSON.parse(firebase_config) : {};
+        const initialAuthToken = typeof initial_auth_token !== 'undefined' ? initial_auth_token : null;
 
-<header class="bg-gradient-to-r from-purple-700 to-pink-500 text-white p-4 flex justify-between items-center shadow-lg">
-  <h1 class="text-xl font-bold">⚙️ Admin Panel</h1>
-  <p id="currentZone">Zone ID: ...</p>
-</header>
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        
+        // Initial Data Structure and Constants
+        const DEFAULT_USER_DATA = {
+            balance: 30.00, // ৳30 join bonus
+            adsWatchedToday: 0,
+            totalAdsWatched: 0,
+            totalReferrals: 0,
+            lastAdWatchDate: new Date().toLocaleDateString('en-CA'), // YYYY-MM-DD
+            withdrawalStatus: 'none', // 'none', 'pending', 'paid'
+            pendingAmount: 0,
+            withdrawalDetails: {}, // Stores method and number
+        };
 
-<main class="p-6 flex-grow max-w-5xl mx-auto w-full space-y-6">
-  <section class="bg-white rounded-xl shadow p-6">
-    <h2 class="text-lg font-bold text-purple-700 mb-4">Zone Settings</h2>
-    <div class="flex items-center space-x-3">
-      <input id="zoneIdInput" type="text" class="border rounded-lg p-2 w-40" placeholder="Enter Zone ID"/>
-      <button onclick="updateZoneId()" class="bg-purple-700 text-white px-4 py-2 rounded-lg">Update Zone</button>
-    </div>
-  </section>
+        let userData = { ...DEFAULT_USER_DATA };
+        const AD_LIMIT_PER_DAY = 20;
+        const AD_INCOME = 10;
+        const MIN_WITHDRAWAL_BALANCE = 1500;
+        const MIN_WITHDRAWAL_REFERRALS = 10;
 
-  <section class="bg-white rounded-xl shadow p-6">
-    <h2 class="text-lg font-bold text-purple-700 mb-4">Users Data</h2>
-    <div class="overflow-x-auto">
-      <table class="min-w-full border border-gray-200">
-        <thead class="bg-purple-700 text-white">
-          <tr>
-            <th class="px-4 py-2">Photo</th>
-            <th class="px-4 py-2">Name</th>
-            <th class="px-4 py-2">Username</th>
-            <th class="px-4 py-2">Balance</th>
-            <th class="px-4 py-2">Total Ads</th>
-            <th class="px-4 py-2">Tasks</th>
-            <th class="px-4 py-2">Ads Watched</th>
-          </tr>
-        </thead>
-        <tbody id="userTable"></tbody>
-      </table>
-    </div>
-  </section>
-</main>
+        /**
+         * Initializes Firebase and handles authentication.
+         */
+        async function initializeFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // 1. Authenticate user using custom token or anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                // 2. Auth state listener (Crucial for getting the UID and starting data listener)
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Authentication successful. UID:", userId);
+                        
+                        // Update UI with User ID
+                        document.getElementById('user-id-display').textContent = userId.substring(0, 8) + '...';
+                        document.getElementById('profile-user-id').textContent = userId;
+                        
+                        // Start listening to data once authenticated
+                        listenToUserData();
+                    } else {
+                        console.log("User is signed out or auth state is pending.");
+                    }
+                });
+                
+            } catch (error) {
+                console.error("Firebase initialization or authentication failed:", error);
+            }
+        }
 
-<script>
-fetch("zone.json").then(r=>r.json()).then(data=>{
-  document.getElementById("currentZone").innerText = "Zone ID: " + data.zoneId;
-  document.getElementById("zoneIdInput").value = data.zoneId;
-});
+        /**
+         * Gets the Firestore document reference for the current user's data.
+         * Data path: /artifacts/{appId}/users/{userId}/incomeApp/data
+         */
+        function getUserDocRef() {
+            if (!userId || !db) return null;
+            return doc(db, 'artifacts', appId, 'users', userId, 'incomeApp', 'data');
+        }
 
-function updateZoneId(){
-  let newId = document.getElementById("zoneIdInput").value;
-  fetch("save_zone.php",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({zoneId:newId})
-  }).then(()=>alert("✅ Zone Updated!"));
-}
+        /**
+         * Fetches initial user data from Firestore or creates a new one.
+         */
+        async function fetchOrCreateUserData() {
+            const userDocRef = getUserDocRef();
+            if (!userDocRef) return;
 
-fetch("users.json").then(r=>r.json()).then(users=>{
-  let table = document.getElementById("userTable");
-  for(let id in users){
-    let u = users[id];
-    table.innerHTML += `
-      <tr class="text-center border-t">
-        <td><img src="${u.photo}" class="w-10 h-10 rounded-full mx-auto"/></td>
-        <td>${u.name}</td>
-        <td>@${u.username}</td>
-        <td class="text-purple-700 font-bold">${u.balance.toFixed(2)} ৳</td>
-        <td>${u.totalAds}</td>
-        <td>${u.tasks}</td>
-        <td>${u.adsWatched}</td>
-      </tr>`;
-  }
-});
-</script>
-</body>
-</html>
+            try {
+                const docSnap = await getDoc(userDocRef);
+                const today = new Date().toLocaleDateString('en-CA');
+                
+                if (docSnap.exists()) {
+                    let data = docSnap.data();
+                    
+                    // Reset daily ad count if the last watch date is not today
+                    if (data.lastAdWatchDate !== today) {
+                        data.adsWatchedToday = 0;
+                        data.lastAdWatchDate = today;
+                        await updateDoc(userDocRef, { 
+                            adsWatchedToday: 0, 
+                            lastAdWatchDate: today 
+                        });
+                    }
+                    userData = data;
+                } else {
+                    // New user: Set initial data including the join bonus
+                    await setDoc(userDocRef, DEFAULT_USER_DATA);
+                    userData = DEFAULT_USER_DATA;
+                }
+                updateUI();
+                checkAdButtonStatus();
+            } catch (error) {
+                console.error("Error fetching or setting user data:", error);
+            }
+        }
+
+        /**
+         * Sets up a real-time listener for user data.
+         */
+        function listenToUserData() {
+            const userDocRef = getUserDocRef();
+            if (!userDocRef) return;
+
+            onSnapshot(userDocRef, (doc) => {
+                if (doc.exists()) {
+                    const today = new Date().toLocaleDateString('en-CA');
+                    let data = doc.data();
+
+                    // Real-time check for daily reset
+                    if (data.lastAdWatchDate !== today) {
+                        // This handles the case where the user keeps the app open past midnight
+                        data.adsWatchedToday = 0;
+                        data.lastAdWatchDate = today;
+                        updateDoc(userDocRef, { 
+                            adsWatchedToday: 0, 
+                            lastAdWatchDate: today 
+                        }).catch(e => console.error("Error updating doc for midnight reset:", e));
+                    }
+
+                    userData = data;
+                    updateUI();
+                    checkAdButtonStatus();
+                    checkWithdrawalStatus();
+                } else {
+                    // User document was deleted or doesn't exist, create it.
+                    fetchOrCreateUserData(); 
+                }
+            }, (error) => {
+                console.error("Error listening to user data:", error);
+            });
+        }
+        
+        /**
+         * Updates all dynamic elements in the UI with the current userData.
+         */
+        function updateUI() {
+            // Format balance to two decimal places
+            const formattedBalance = userData.balance.toFixed(2); 
+
+            // Home Screen
+            document.getElementById('wallet-balance').textContent = formattedBalance;
+            document.getElementById('home-total-referrals').textContent = userData.totalReferrals;
+            document.getElementById('home-total-ads').textContent = userData.totalAdsWatched;
+
+            // Task Screen
+            document.getElementById('ads-count').textContent = userData.adsWatchedToday;
+            const progress = (userData.adsWatchedToday / AD_LIMIT_PER_DAY) * 100;
+            document.getElementById('ads-progress-bar').style.width = `${progress}%`;
+            
+            // Profile Screen
+            document.getElementById('profile-balance').textContent = `৳${formattedBalance}`;
+            document.getElementById('profile-total-referrals').textContent = `${userData.totalReferrals} জন`;
+            document.getElementById('profile-total-ads').textContent = `${userData.totalAdsWatched} টি`;
+            document.getElementById('profile-withdrawal-status').textContent = getWithdrawalStatusText(userData.withdrawalStatus);
+
+            // Withdrawal Conditions
+            updateCondition(
+                'condition-balance', 
+                userData.balance >= MIN_WITHDRAWAL_BALANCE, 
+                `ন্যূনতম ব্যালেন্স: ৳${MIN_WITHDRAWAL_BALANCE.toFixed(2)}`
+            );
+            updateCondition(
+                'condition-referrals', 
+                userData.totalReferrals >= MIN_WITHDRAWAL_REFERRALS, 
+                `রেফার প্রয়োজন: ${MIN_WITHDRAWAL_REFERRALS} জন`
+            );
+        }
+
+        /**
+         * Updates a single withdrawal condition display.
+         */
+        function updateCondition(elementId, isMet, text) {
+            const el = document.getElementById(elementId);
+            const icon = el.querySelector('i');
+            el.innerHTML = `<i class="${isMet ? 'ph-check-circle-fill' : 'ph-x-circle-fill'} text-xl mr-2 ${isMet ? 'text-secondary' : 'text-danger'}"></i> ${text}`;
+        }
+
+        /**
+         * Checks and sets the state of the Watch Ad button.
+         */
+        function checkAdButtonStatus() {
+            const btn = document.getElementById('watch-ad-btn');
+            const message = document.getElementById('ad-message');
+
+            if (userData.adsWatchedToday >= AD_LIMIT_PER_DAY) {
+                btn.disabled = true;
+                message.textContent = "আজকের জন্য আপনার কাজ শেষ। আগামীকাল আবার চেষ্টা করুন।";
+            } else {
+                btn.disabled = false;
+                message.textContent = "";
+            }
+        }
+
+        /**
+         * Generates and returns a pseudo-referral link.
+         */
+        function generateReferralLink() {
+            if (!userId) return "Loading...";
+            // In a real app, this would be a full URL, but here we simulate the code
+            return `REF-${userId.substring(0, 6).toUpperCase()}`;
+        }
+
+        /**
+         * Copies the referral link to the clipboard.
+         */
+        window.copyReferralLink = function() {
+            const referralLinkInput = document.getElementById('referral-link');
+            referralLinkInput.value = generateReferralLink();
+
+            // Use the modern clipboard API
+            navigator.clipboard.writeText(referralLinkInput.value)
+                .then(() => {
+                    const message = document.getElementById('copy-message');
+                    message.classList.remove('hidden');
+                    setTimeout(() => {
+                        message.classList.add('hidden');
+                    }, 2000);
+                })
+                .catch(err => {
+                    console.error('Failed to copy text: ', err);
+                });
+        };
+
+        /**
+         * Displays the current screen and updates the bottom navigation.
+         */
+        window.showScreen = function(screenName) {
+            document.querySelectorAll('.screen').forEach(screen => {
+                screen.classList.remove('active');
+            });
+            document.getElementById(`${screenName}-screen`).classList.add('active');
+
+            document.querySelectorAll('#bottom-nav button').forEach(button => {
+                button.classList.remove('active');
+            });
+            document.getElementById(`nav-${screenName}`).classList.add('active');
+
+            // Refresh referral link on task screen view
+            if (screenName === 'task') {
+                document.getElementById('referral-link').value = generateReferralLink();
+            }
+        };
+
+        /**
+         * Hides the initial welcome modal.
+         */
+        window.hideWelcomeModal = function() {
+            document.getElementById('welcome-modal').classList.remove('show');
+        };
+
+        /**
+         * Helper to get display text for withdrawal status.
+         */
+        function getWithdrawalStatusText(status) {
+            switch(status) {
+                case 'pending': return 'পেন্ডিং ⏳';
+                case 'paid': return 'পেমেন্ট সম্পন্ন ✅';
+                case 'none':
+                default: return 'নেই';
+            }
+        }
+        
+        /**
+         * Checks and updates the withdrawal status card.
+         */
+        function checkWithdrawalStatus() {
+            const card = document.getElementById('withdrawal-status-card');
+            const status = userData.withdrawalStatus;
+            
+            card.className = 'p-4 rounded-xl mb-6 text-center'; // Reset classes
+            
+            if (status === 'pending') {
+                card.classList.add('bg-orange-100', 'border-orange-400');
+                card.innerHTML = `
+                    <p class="text-lg font-bold text-orange-600 flex items-center justify-center">
+                        <i class="ph-hourglass-fill mr-2 text-2xl"></i> উত্তোলন প্রক্রিয়াধীন
+                    </p>
+                    <p class="text-sm text-gray-700 mt-1">আপনার <span class="font-bold">৳${userData.pendingAmount.toFixed(2)}</span> উত্তোলন অনুরোধটি বিবেচনাধীন।</p>
+                `;
+                document.getElementById('request-withdrawal-btn').disabled = true;
+            } else if (status === 'paid') {
+                card.classList.add('bg-green-100', 'border-green-400');
+                card.innerHTML = `
+                    <p class="text-lg font-bold text-green-600 flex items-center justify-center">
+                        <i class="ph-check-circle-fill mr-2 text-2xl"></i> পেমেন্ট সফল
+                    </p>
+                    <p class="text-sm text-gray-700 mt-1">আপনি সফলভাবে টাকা উত্তোলন করেছেন।</p>
+                `;
+                document.getElementById('request-withdrawal-btn').disabled = true;
+            } else {
+                card.innerHTML = ''; // Clear if none
+                document.getElementById('request-withdrawal-btn').disabled = false;
+            }
+        }
+
+
+        // --- CORE APPLICATION LOGIC ---
+
+        /**
+         * *** AD INTEGRATION POINT ***
+         * Handles the logic for watching an ad and rewarding the user.
+         */
+        window.watchVideoAd = async function() {
+            if (!isAuthReady) {
+                document.getElementById('ad-message').textContent = "অপেক্ষা করুন, সিস্টেম লোড হচ্ছে...";
+                return;
+            }
+            if (userData.adsWatchedToday >= AD_LIMIT_PER_DAY) {
+                checkAdButtonStatus(); // Should already be disabled, but re-check
+                return;
+            }
+
+            const btn = document.getElementById('watch-ad-btn');
+            const message = document.getElementById('ad-message');
+            btn.disabled = true;
+            btn.textContent = "বিজ্ঞাপন লোড হচ্ছে...";
+            message.textContent = "";
+
+            try {
+                // 1. Check if the ad function is globally available
+                if (typeof show_10223580 !== 'function') {
+                    throw new Error("Ad SDK function not found. Check integration.");
+                }
+
+                // 2. Call the Rewarded Ad function
+                // The ad will display, and the promise resolves only upon successful completion/close.
+                await show_10223580('pop'); 
+
+                // --- REWARD LOGIC (This runs ONLY if the ad is successfully watched/closed) ---
+
+                // 3. Calculate new data
+                const newBalance = userData.balance + AD_INCOME;
+                const newAdsToday = userData.adsWatchedToday + 1;
+                const newTotalAds = userData.totalAdsWatched + 1;
+                const today = new Date().toLocaleDateString('en-CA');
+                
+                // 4. Update Firestore
+                const userDocRef = getUserDocRef();
+                await updateDoc(userDocRef, {
+                    balance: newBalance,
+                    adsWatchedToday: newAdsToday,
+                    totalAdsWatched: newTotalAds,
+                    lastAdWatchDate: today 
+                });
+
+                // 5. Success feedback
+                message.textContent = `✅ সফল! আপনার অ্যাকাউন্টে ৳${AD_INCOME.toFixed(2)} যোগ হয়েছে।`;
+
+            } catch (error) {
+                // This block catches errors from Firebase or if the ad fails to load/play/user closes prematurely
+                console.error("Ad viewing or rewarding failed:", error);
+                
+                // Check if the error is from the ad library (PopAds will reject if failed)
+                if (error.message.includes("Ad SDK function not found") || error.message.includes("user get error")) {
+                     message.textContent = "❌ বিজ্ঞাপন লোড হতে ব্যর্থ হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।";
+                } else {
+                     message.textContent = "❌ একটি অজানা সমস্যা হয়েছে।";
+                }
+
+            } finally {
+                // 6. Reset button state and check daily limit
+                btn.textContent = `৳${AD_INCOME.toFixed(2)} এর জন্য বিজ্ঞাপন দেখুন`;
+                checkAdButtonStatus();
+            }
+        };
+
+        /**
+         * Requests a withdrawal if conditions are met.
+         */
+        window.requestWithdrawal = async function() {
+            if (userData.withdrawalStatus !== 'none') {
+                document.getElementById('withdrawal-message').textContent = "আপনার একটি উত্তোলন প্রক্রিয়াধীন বা সফল হয়েছে।";
+                return;
+            }
+
+            const balanceMet = userData.balance >= MIN_WITHDRAWAL_BALANCE;
+            const referralsMet = userData.totalReferrals >= MIN_WITHDRAWAL_REFERRALS;
+            
+            if (!balanceMet || !referralsMet) {
+                document.getElementById('withdrawal-message').textContent = "❌ উত্তোলনের শর্তাবলী পূরণ হয়নি।";
+                return;
+            }
+
+            const method = document.getElementById('withdrawal-method').value;
+            const number = document.getElementById('withdrawal-number').value.trim();
+
+            if (!number || number.length < 11 || number.length > 15) {
+                document.getElementById('withdrawal-message').textContent = "❌ অনুগ্রহ করে একটি সঠিক অ্যাকাউন্ট নম্বর দিন।";
+                return;
+            }
+
+            const btn = document.getElementById('request-withdrawal-btn');
+            btn.disabled = true;
+            btn.textContent = "অনুরোধ পাঠানো হচ্ছে...";
+            document.getElementById('withdrawal-message').textContent = "";
+
+            try {
+                const userDocRef = getUserDocRef();
+                const withdrawalAmount = userData.balance; // Withdraw the full current balance
+
+                await updateDoc(userDocRef, {
+                    withdrawalStatus: 'pending',
+                    pendingAmount: withdrawalAmount,
+                    // Note: In a real app, you would move the money to a 'pending_withdrawals' collection
+                    withdrawalDetails: {
+                        method: method,
+                        number: number,
+                        timestamp: new Date().toISOString()
+                    },
+                    // For simplicity, we don't reduce the balance here, the admin does that upon payment.
+                });
+
+                document.getElementById('withdrawal-message').textContent = "✅ উত্তোলন অনুরোধ সফলভাবে পাঠানো হয়েছে! অপেক্ষা করুন।";
+                checkWithdrawalStatus(); // Update UI immediately
+            } catch (error) {
+                console.error("Withdrawal request failed:", error);
+                document.getElementById('withdrawal-message').textContent = "❌ অনুরোধ পাঠাতে ব্যর্থ হয়েছে।";
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "উত্তোলন অনুরোধ করুন";
+            }
+        };
+
+        // --- Initialization ---
+        
+        // Ensure UI elements are correctly set up on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeFirebase();
+            // Show the welcome modal initially, it's hidden by a button click
+            // The modal is set to 'show' in the HTML, so this is just a reminder.
+        });
